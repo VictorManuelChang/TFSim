@@ -262,6 +262,8 @@ void top::metrics(int cpu_freq, int mode, string bench_name, int n_bits) {
         
         double mips = total_instructions_exec / (t_cpu * 1e-9 * 1e6); 
 
+        cpi_history.emplace_back(bench_name, cpi_medio);
+
         cout <<
         "\n\n"
         "MÉTRICAS:\n" <<

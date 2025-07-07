@@ -13,11 +13,62 @@
 #include "gui.hpp"
 #include <unistd.h>
 #include <libgen.h>
+#include <cstdlib>   // std::rand
+#include <ctime>     // std::time
+#include <sstream>
+#include <set>
+
 
 using std::string;
 using std::vector;
 using std::map;
 using std::fstream;
+
+void salvar_cpi_history(const std::vector<std::pair<std::string, double>>& novos_cpis, const std::string& filename) {
+    std::map<std::string, double> historico;
+
+    // Passo 1: Ler histórico existente
+    std::ifstream in(filename);
+    if (in) {
+        std::string nome;
+        double cpi;
+        while (in >> nome >> cpi)
+            historico[nome] = cpi;  // substitui se duplicado
+        in.close();
+    }
+
+    // Passo 2: Atualizar com os novos valores
+    for (const auto& [nome, cpi] : novos_cpis)
+        historico[nome] = cpi;  // sobrescreve se já existir
+
+    // Passo 3: Escrever tudo de volta
+    std::ofstream out(filename);
+    if (!out) {
+        std::cerr << "Erro ao abrir arquivo para salvar cpi_history\n";
+        return;
+    }
+
+    for (const auto& [nome, cpi] : historico)
+        out << nome << " " << cpi << "\n";
+
+    out.close();
+}
+
+void carregar_cpi_history(std::vector<std::pair<std::string, double>>& cpi_history, const std::string& filename) {
+    std::ifstream in(filename);
+    if (!in) {
+        std::cerr << "Arquivo de histórico não encontrado. Começando vazio.\n";
+        return;
+    }
+
+    std::string name;
+    double cpi;
+    while (in >> name >> cpi)
+        cpi_history.emplace_back(name, cpi);
+
+    in.close();
+}
+
 
 
 const char* get_base_path(const char **argv) {
@@ -77,6 +128,7 @@ int sc_main(int argc, char *argv[])
     button start(fm);
     button run_all(fm);
     button clock_control(fm);
+    button analise(fm);
     button exit(fm);
     group clock_group(fm);
     label clock_count(clock_group);
@@ -91,12 +143,15 @@ int sc_main(int argc, char *argv[])
     {"SLT",1},{"SGT", 1}};
     // Responsavel pelos modos de execução
     top top1("top");
+    std::string caminho_salvar = "./in/benchmarks/cpi_history.txt";
+    carregar_cpi_history(top1.cpi_history, caminho_salvar); 
+    analise.caption("Analise");
     start.caption("Start");
     clock_control.caption("Next cycle");
     run_all.caption("Run all");
     exit.caption("Exit");
     plc["rst"] << table;
-    plc["btns"] << start << clock_control << run_all << exit;
+    plc["btns"] << analise << start << clock_control << run_all << exit;
     plc["memor"] << memory;
     plc["regs"] << reg;
     plc["rob"] << rob;
@@ -427,7 +482,8 @@ int sc_main(int argc, char *argv[])
             fila = true;
     });
     bench_sub->append("Stall por Divisão",[&](menu::item_proxy &ip){
-        string path = base_path + "/in/benchmarks/division_stall.txt";       
+        string path = base_path + "/in/benchmarks/division_stall.txt";
+        bench_name = "division_stall";       
         inFile.open(path);
         if(!add_instructions(inFile,instruction_queue,instruct))
             show_message("Arquivo inválido","Não foi possível abrir o arquivo!");
@@ -444,7 +500,8 @@ int sc_main(int argc, char *argv[])
             fila = true;
     });
     bench_sub->append("Stall por hazard estrutural (Adds)",[&](menu::item_proxy &ip){
-        string path = base_path + "/in/benchmarks/res_stations_stall.txt";       
+        string path = base_path + "/in/benchmarks/res_stations_stall.txt";
+        bench_name = "res_stations_stall";       
         inFile.open(path);
         if(!add_instructions(inFile,instruction_queue,instruct))
             show_message("Arquivo inválido","Não foi possível abrir o arquivo!");
@@ -896,6 +953,67 @@ int sc_main(int argc, char *argv[])
     clock_control.enabled(false);
     run_all.enabled(false);
     
+    analise.events().click([&]{
+        auto* empty_window = new nana::form(nana::API::make_center(1650, 720));
+        empty_window->caption("Análise de Desempenho");
+
+        nana::drawing drawing(*empty_window);
+
+        drawing.draw([&](nana::paint::graphics& graph)
+        {
+            graph.rectangle(true, nana::colors::white);
+
+            if (top1.cpi_history.empty())
+            {
+                graph.string({20, 30}, "Nenhum benchmark executado ainda.");
+                return;
+            }
+
+            const int base_y = 600;
+            const int bar_width = 50;
+            const int min_space = 40;
+
+            // Calcula o maior comprimento de nome para ajustar o espaçamento
+            std::size_t max_name_len = 0;
+            for (const auto& [name, _] : top1.cpi_history)
+                if (name.length() > max_name_len)
+                    max_name_len = name.length();
+
+            int space = std::max(min_space, static_cast<int>(max_name_len * 6));  // ajuste do espaço com base no tamanho do texto
+
+            double max_cpi = 0;
+            for (const auto& [_, cpi] : top1.cpi_history)
+                if (cpi > max_cpi)
+                    max_cpi = cpi;
+
+            int x = 50;
+            int idx = 0;
+            for (const auto& [name, cpi] : top1.cpi_history)
+            {
+                int bar_height = static_cast<int>((cpi / max_cpi) * 400);
+
+                // Desenha a barra
+                graph.rectangle(nana::rectangle(x, base_y - bar_height, bar_width, bar_height), true, nana::colors::deep_sky_blue);
+
+                // Alterna altura do nome para zigue-zague e desenha o nome completo
+                int text_y = (idx % 2 == 0) ? base_y + 10 : base_y + 25;
+                graph.string({x - 5, text_y}, name);  // um leve deslocamento horizontal
+
+                // Mostra o CPI acima da barra
+                std::string cpi_str = std::to_string(cpi).substr(0, 5);
+                graph.string({x, base_y - bar_height - 20}, "CPI: " + cpi_str);
+
+                x += bar_width + space;
+                idx++;
+            }
+        });
+
+        drawing.update();
+        empty_window->show();
+    });
+
+
+   
     start.events().click([&]
     {
         if(fila)
@@ -928,25 +1046,154 @@ int sc_main(int argc, char *argv[])
             show_message("Fila de instruções vazia","A fila de instruções está vazia. Insira um conjunto de instruções para iniciar.");
     });
 
+    bool cpi_mostrado = false;
+    
+    
     clock_control.events().click([&]
     {
-        if(spec && top1.get_rob_queue().queue_is_empty() && top1.get_rob().rob_is_empty())
+        if (spec && top1.get_rob_queue().queue_is_empty() && top1.get_rob().rob_is_empty())
             return;
         else if (!spec && top1.get_queue().queue_is_empty())
             return;
-        if(sc_is_running())
+
+        if (sc_is_running())
             sc_start();
-    });
 
-    run_all.events().click([&]{
-        // enquanto queue e rob nao estao vazios, roda ate o fim
-        while(!(top1.get_queue().queue_is_empty() && top1.get_rob().rob_is_empty())){
-            if(sc_is_running())
-                sc_start();
+        if (!cpi_mostrado && top1.get_rob_queue().queue_is_empty() && top1.get_rob().rob_is_empty()) {
+            cpi_mostrado = true;
+
+            // Gera métricas e adiciona ao cpi_history
+            top1.metrics(cpu_freq, mode, bench_name, n_bits);
+
+            // === FILTRA DUPLICATAS antes de salvar ===
+            std::set<std::string> nomes_vistos;
+            std::vector<std::pair<std::string, double>> unicos;
+
+            for (auto it = top1.cpi_history.rbegin(); it != top1.cpi_history.rend(); ++it) {
+                const auto& [nome, cpi] = *it;
+                if (nomes_vistos.insert(nome).second) {
+                    unicos.push_back(*it); // mantém a entrada mais recente
+                }
+            }
+            std::reverse(unicos.begin(), unicos.end());
+            top1.cpi_history = unicos;
+
+            // Salva apenas os únicos
+            salvar_cpi_history(top1.cpi_history, caminho_salvar);
+
+            unsigned int instr_count = top1.get_rob_queue().get_instruction_counter();
+            double ciclos = static_cast<double>((sc_time_stamp().to_double() / 1000) - 1);
+            double cpi = instr_count ? ciclos / instr_count : 0;
+
+            auto* popup = new nana::form(API::make_center(400, 300));
+            popup->caption("Resumo da Execução");
+
+            auto* lbl = new nana::label(*popup);
+            lbl->format(true);
+            std::string info =
+                "Instruções executadas: <bold>" + std::to_string(instr_count) + "</>\n"
+                "Ciclos totais: <bold>" + std::to_string((int)ciclos) + "</>\n"
+                "CPI Médio: <bold>" + std::to_string(cpi) + "</>\n"
+                "Tempo de CPU: <bold>" + std::to_string(cpi * instr_count * (1e9 / (cpu_freq * 1e6))) + " ns</>\n"
+                "MIPS: <bold>" + std::to_string(instr_count / (cpi * instr_count * 1e6 / (cpu_freq * 1e6))) + " milhões de instruções por segundo</>\n";
+
+            if (mode == 1) {
+                double hit_rate = top1.get_rob().get_preditor().get_predictor_hit_rate();
+                if (hit_rate >= 0 && hit_rate <= 100) {
+                    info += "Taxa de sucesso - 1 Preditor: <bold>" + std::to_string(hit_rate) + "%</>\n";
+                }
+            } else {
+                double bpb_hit = top1.get_rob().get_bpb().bpb_get_hit_rate();
+                if (bpb_hit >= 0 && bpb_hit <= 100) {
+                    info += "Taxa de sucesso - BPB[" + std::to_string(top1.get_rob().get_bpb().get_bpb_size()) + "]: <bold>" +
+                            std::to_string(bpb_hit) + "%</>\n";
+                }
+            }
+
+            lbl->caption(info);
+
+            popup->div("vert <><weight=90% texto><>");
+            (*popup)["texto"] << *lbl;
+            popup->collocate();
+            popup->show();
         }
-
-        top1.metrics(cpu_freq, mode, bench_name, n_bits);
     });
+
+
+    
+    run_all.events().click([&]{
+        while (true) {
+            if (spec && top1.get_rob_queue().queue_is_empty() && top1.get_rob().rob_is_empty())
+                break;
+            else if (!spec && top1.get_queue().queue_is_empty())
+                break;
+
+            if (sc_is_running())
+                sc_start();
+            
+            if (!cpi_mostrado && top1.get_rob_queue().queue_is_empty() && top1.get_rob().rob_is_empty()) {
+                cpi_mostrado = true;
+
+                // Gera métricas e adiciona ao cpi_history
+                top1.metrics(cpu_freq, mode, bench_name, n_bits);
+
+                // === FILTRA DUPLICATAS antes de salvar ===
+                std::set<std::string> nomes_vistos;
+                std::vector<std::pair<std::string, double>> unicos;
+
+                for (auto it = top1.cpi_history.rbegin(); it != top1.cpi_history.rend(); ++it) {
+                    const auto& [nome, cpi] = *it;
+                    if (nomes_vistos.insert(nome).second) {
+                        unicos.push_back(*it); // mantém a entrada mais recente
+                    }
+                }
+                std::reverse(unicos.begin(), unicos.end());
+                top1.cpi_history = unicos;
+
+                // Salva apenas os únicos
+                salvar_cpi_history(top1.cpi_history, caminho_salvar);
+
+                // Informações para popup
+                unsigned int instr_count = top1.get_rob_queue().get_instruction_counter();
+                double ciclos = static_cast<double>((sc_time_stamp().to_double() / 1000) - 1);
+                double cpi = instr_count ? ciclos / instr_count : 0;
+
+                auto* popup = new nana::form(API::make_center(400, 300));
+                popup->caption("Resumo da Execução");
+
+                auto* lbl = new nana::label(*popup);
+                lbl->format(true);
+                std::string info =
+                    "Instruções executadas: <bold>" + std::to_string(instr_count) + "</>\n"
+                    "Ciclos totais: <bold>" + std::to_string((int)ciclos) + "</>\n"
+                    "CPI Médio: <bold>" + std::to_string(cpi) + "</>\n"
+                    "Tempo de CPU: <bold>" + std::to_string(cpi * instr_count * (1e9 / (cpu_freq * 1e6))) + " ns</>\n"
+                    "MIPS: <bold>" + std::to_string(instr_count / (cpi * instr_count * 1e6 / (cpu_freq * 1e6))) + " milhões de instruções por segundo</>\n";
+
+                if (mode == 1) {
+                    double hit_rate = top1.get_rob().get_preditor().get_predictor_hit_rate();
+                    if (hit_rate >= 0 && hit_rate <= 100) {
+                        info += "Taxa de sucesso - 1 Preditor: <bold>" + std::to_string(hit_rate) + "%</>\n";
+                    }
+                } else {
+                    double bpb_hit = top1.get_rob().get_bpb().bpb_get_hit_rate();
+                    if (bpb_hit >= 0 && bpb_hit <= 100) {
+                        info += "Taxa de sucesso - BPB[" + std::to_string(top1.get_rob().get_bpb().get_bpb_size()) + "]: <bold>" +
+                                std::to_string(bpb_hit) + "%</>\n";
+                    }
+                }
+
+                lbl->caption(info);
+
+                popup->div("vert <><weight=90% texto><>");
+                (*popup)["texto"] << *lbl;
+                popup->collocate();
+                popup->show();
+            }
+        }
+    });
+
+
 
     exit.events().click([]
     {
