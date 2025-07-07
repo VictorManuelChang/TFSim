@@ -1,1 +1,10 @@
+binary_search 4.18868
+bubble_sort 1.3315
+division_stall 5.85714
+fibonacci 1.6087
+insertion_sort 1.10204
 linear_search 2.60184
+matriz_search 1.93829
+res_stations_stall 3.25
+store_stress 1.55152
+tick_tack 2.00439
